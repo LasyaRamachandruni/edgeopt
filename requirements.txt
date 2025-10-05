@@ -1,0 +1,10 @@
+torch
+torchvision
+onnx
+onnxruntime
+onnxruntime-tools
+tqdm
+numpy
+psutil
+pandas
+matplotlib
