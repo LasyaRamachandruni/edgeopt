@@ -3,6 +3,7 @@ import torch
 import torch.nn.utils.prune as prune
 import torchvision.models as models
 import torch.nn as nn
+from edgeopt.utils import onnx_export_kwargs
 
 def prune_mobilenetv2_model(model, amount=0.3, min_layer=5):
     """
@@ -45,7 +46,8 @@ def export_pruned_model_onnx(amount=0.3, input_path=None, output_path="mobilenet
         do_constant_folding=True,
         input_names=['input'],
         output_names=['output'],
-        dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
+        dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}},
+        **onnx_export_kwargs(),
     )
     print(f"Pruned model (prune ratio={amount}, from layer={min_prune_layer}) exported to {output_path}")
 

@@ -3,6 +3,7 @@ import torchvision.models as models
 import onnx
 import onnxruntime
 import numpy as np
+from edgeopt.utils import onnx_export_kwargs
 
 def export_finetuned_to_onnx(weights_path="mobilenetv2_cifar10.pth", output_path="mobilenetv2_cifar10.onnx"):
     # Load MobileNetV2 architecture
@@ -24,7 +25,8 @@ def export_finetuned_to_onnx(weights_path="mobilenetv2_cifar10.pth", output_path
         do_constant_folding=True,
         input_names=['input'],
         output_names=['output'],
-        dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
+        dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}},
+        **onnx_export_kwargs(),
     )
     print(f"Fine-tuned CIFAR-10 model exported to {output_path}")
 

@@ -4,6 +4,7 @@ import torch.optim as optim
 import torch.nn.utils.prune as prune
 import torchvision
 import torchvision.transforms as transforms
+from edgeopt.utils import onnx_export_kwargs
 
 def prune_mobilenet(model, amount=0.1, min_layer=5):
     for idx, block in enumerate(model.features):
@@ -71,7 +72,8 @@ def main(weights_path='mobilenetv2_cifar10.pth', prune_amount=0.1, min_prune_lay
         do_constant_folding=True,
         input_names=['input'],
         output_names=['output'],
-        dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
+        dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}},
+        **onnx_export_kwargs(),
     )
     print(f"Exported pruned and fine-tuned model to {output_onnx}")
 
