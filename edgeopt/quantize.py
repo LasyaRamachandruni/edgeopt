@@ -10,10 +10,12 @@ def quantize_onnx_dynamic(input_path, output_path, quant_type="int8"):
             weight_type=QuantType.QUInt8  # Changed from QInt8
         )
     elif quant_type.lower() == "fp16":
-        quantize_dynamic(
-            input_path, output_path, 
-            weight_type=QuantType.QFloat16
-        )
+        # onnxruntime has no FP16 "quantization" type; FP16 is a precision conversion.
+        # keep_io_types leaves inputs/outputs as float32 so callers don't need to change.
+        from onnxruntime.transformers.float16 import convert_float_to_float16
+
+        model = onnx.load(input_path)
+        onnx.save(convert_float_to_float16(model, keep_io_types=True), output_path)
     else:
         raise ValueError("Only 'int8' and 'fp16' quantization are supported")
     print("Dynamic quantization done.")
