@@ -6,3 +6,9 @@ __pycache__/
 data/
 models/
 
+
+# generated model files and build metadata
+*.onnx
+*.pth
+*.egg-info/
+.pytest_cache/
