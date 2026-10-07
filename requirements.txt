@@ -2,9 +2,6 @@ torch
 torchvision
 onnx
 onnxruntime
-onnxruntime-tools
-tqdm
+torch-pruning>=1.5
 numpy
-psutil
-pandas
-matplotlib
+datasets
