@@ -1,5 +1,7 @@
 """Tests for pruning, export, quantization and benchmarking (CPU, no dataset needed)."""
 
+import json
+
 import numpy as np
 import onnx
 import onnxruntime as ort
@@ -153,3 +155,25 @@ def test_throughput_uses_total_wall_time():
     assert m["latency_p50_ms"] == pytest.approx(10.0)
     assert m["latency_mean_ms"] == pytest.approx(25.0)
     assert m["latency_p95_ms"] > m["latency_p50_ms"]
+
+
+def test_report_writes_json_and_markdown(small_onnx, tmp_path):
+    from edgeopt.report import collect, onnx_param_count, write_report
+
+    assert onnx_param_count(str(small_onnx)) == 3 * 16 * 16 * 256 + 256 + 256 * 10 + 10
+    rows, meta = collect([("small", str(small_onnx))], N=5, warmup=1, threads=1, accuracy=False)
+    md = write_report(rows, meta, str(tmp_path / "res"))
+    data = json.loads((tmp_path / "res" / "results.json").read_text())
+    assert data["results"][0]["model"] == "small"
+    assert data["results"][0]["accuracy"] is None
+    assert "| small | pending |" in md
+
+
+def test_cli_prune_defaults_to_cifar10_head(tmp_path):
+    from edgeopt.cli import main
+
+    out = tmp_path / "p.onnx"
+    main(["prune", "--amount", "0.3", "--output", str(out)])
+    sess = ort.InferenceSession(str(out))
+    (logits,) = sess.run(None, {"input": np.zeros((1, 3, 224, 224), np.float32)})
+    assert logits.shape == (1, 10)

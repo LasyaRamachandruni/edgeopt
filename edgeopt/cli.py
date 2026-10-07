@@ -1,69 +1,94 @@
 import argparse
-from .export import export_finetuned_to_onnx, verify_onnx_model
-from .quantize import quantize_onnx_dynamic
-from .prune import export_pruned_model_onnx
-from .benchmark import benchmark_onnx_model
-from .eval import eval_onnx_classifier
 
-def main():
-    parser = argparse.ArgumentParser(description="Edge-Optimized ONNX Model Converter & Benchmark")
-    subparsers = parser.add_subparsers(dest='command', help='Available commands')
-
-    # Quantize subcommand
-    quant_parser = subparsers.add_parser('quantize', help='Quantize an ONNX model')
-    quant_parser.add_argument('--input', '-i', required=True, help='Input ONNX file')
-    quant_parser.add_argument('--output', '-o', default='model_quant.onnx', help='Output ONNX file')
-    quant_parser.add_argument('--quant-type', default='int8', choices=['int8', 'fp16'], help='Quantization type')
-
-    # Prune subcommand
-    prune_parser = subparsers.add_parser('prune', help='Prune a PyTorch model and export to ONNX')
-    prune_parser.add_argument('--input', '-i', required=False, help='Input ONNX or PyTorch model file')
-    prune_parser.add_argument('--amount', type=float, default=0.3, help='Fraction of channels to prune, e.g. 0.3')
-    prune_parser.add_argument('--output', '-o', default='mobilenetv2_pruned.onnx', help='Output ONNX file')
-    prune_parser.add_argument('--weights', '-w', default=None, help='Path to PyTorch weights (.pth) to prune (optional)')
-    prune_parser.add_argument('--num-classes', type=int, default=1000, help='Number of output classes for the model (default: 1000)')
+NUM_CLASSES = 10  # the whole workflow is MobileNetV2 fine-tuned on CIFAR-10
 
 
-    # Benchmark subcommand
-    bench_parser = subparsers.add_parser('benchmark', help='Benchmark an ONNX model')
-    bench_parser.add_argument('--model', required=True, help='ONNX file to benchmark')
-    bench_parser.add_argument('--N', type=int, default=200, help='Number of runs')
-    bench_parser.add_argument('--batch-size', type=int, default=1, help='Batch size')
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Export, prune, quantize and benchmark MobileNetV2 (CIFAR-10) with ONNX Runtime")
+    sub = parser.add_subparsers(dest="command")
 
-    # Evaluate subcommand
-    eval_parser = subparsers.add_parser('evaluate', help='Evaluate ONNX model accuracy on CIFAR-10')
-    eval_parser.add_argument('--model', required=True, help='ONNX model to evaluate')
-    eval_parser.add_argument('--batch-size', type=int, default=64, help='Batch size')
-    eval_parser.add_argument('--max-batches', type=int, default=None, help='Max batches for quick accuracy test')
+    p = sub.add_parser("export", help="Export fine-tuned PyTorch weights to ONNX")
+    p.add_argument("--weights", "-w", default="mobilenetv2_cifar10.pth")
+    p.add_argument("--output", "-o", default="mobilenetv2_cifar10.onnx")
+    p.add_argument("--num-classes", type=int, default=NUM_CLASSES)
+    p.add_argument("--verify", action="store_true")
 
-    # Export subcommand
-    export_parser = subparsers.add_parser('export', help='Export fine-tuned PyTorch model to ONNX')
-    export_parser.add_argument('--weights', '-w', default='mobilenetv2_cifar10.pth',
-                              help='Path to fine-tuned weights')
-    export_parser.add_argument('--output', '-o', default='mobilenetv2_cifar10.onnx',
-                              help='Output ONNX file path (default: mobilenetv2_cifar10.onnx)')
-    export_parser.add_argument('--verify', action='store_true',
-                              help='Verify exported ONNX model')
+    p = sub.add_parser("prune", help="Structurally prune channels and export to ONNX")
+    p.add_argument("--weights", "-w", default=None, help="Fine-tuned state_dict (.pth); random init if omitted")
+    p.add_argument("--amount", type=float, default=0.3, help="Fraction of channels to remove per layer")
+    p.add_argument("--output", "-o", default="mobilenetv2_pruned.onnx")
+    p.add_argument("--save", default=None, help="Also save the pruned PyTorch module (.pt) for fine-tuning")
+    p.add_argument("--num-classes", type=int, default=NUM_CLASSES)
 
-    args = parser.parse_args()
+    p = sub.add_parser("quantize", help="Quantize an ONNX model")
+    p.add_argument("--input", "-i", required=True)
+    p.add_argument("--output", "-o", default="model_int8.onnx")
+    p.add_argument("--mode", default="static", choices=["static", "dynamic", "fp16"],
+                   help="static: INT8 QDQ with calibration (use for conv nets); dynamic: INT8 weights only; fp16")
+    p.add_argument("--calib-size", type=int, default=300, help="CIFAR-10 training images used for calibration")
+    p.add_argument("--calib-data", default="cifar10", choices=["cifar10", "synthetic"],
+                   help="synthetic = random noise; only valid for size/latency checks, not accuracy")
+    p.add_argument("--no-per-channel", action="store_true")
 
-    if args.command == 'export':
-        print(f"Exporting fine-tuned PyTorch model to {args.output} using weights {args.weights} ...")
-        export_finetuned_to_onnx(weights_path=args.weights, output_path=args.output)
+    p = sub.add_parser("benchmark", help="Measure batch latency and throughput of an ONNX model")
+    p.add_argument("--model", required=True)
+    p.add_argument("--N", type=int, default=200, help="Timed runs")
+    p.add_argument("--warmup", type=int, default=20)
+    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--threads", type=int, default=0, help="ORT intra-op threads (0 = runtime default)")
+
+    p = sub.add_parser("evaluate", help="Top-1 accuracy of an ONNX model on CIFAR-10 test")
+    p.add_argument("--model", required=True)
+    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--subset", type=int, default=None, help="Fixed seeded subset of N test images")
+
+    p = sub.add_parser("report", help="Benchmark/evaluate several models, write results.json + results.md")
+    p.add_argument("--models", nargs="+", required=True, help="NAME=path.onnx entries, in table order")
+    p.add_argument("--out-dir", default="results")
+    p.add_argument("--N", type=int, default=200)
+    p.add_argument("--warmup", type=int, default=20)
+    p.add_argument("--threads", type=int, default=1)
+    p.add_argument("--eval-subset", type=int, default=None, help="Evaluate on N test images instead of all 10k")
+    p.add_argument("--no-accuracy", action="store_true")
+
+    args = parser.parse_args(argv)
+
+    if args.command == "export":
+        from .export import export_finetuned_to_onnx, verify_onnx_model
+
+        export_finetuned_to_onnx(args.weights, args.output, num_classes=args.num_classes)
         if args.verify:
-            print("Verifying ONNX model...")
             verify_onnx_model(args.output)
-    elif args.command == 'quantize':
-        quantize_onnx_dynamic(args.input, args.output, quant_type=args.quant_type)
-    elif args.command == 'prune':
-        # If weights provided, pass them and num_classes so the pruner builds the same head
-        export_pruned_model_onnx(amount=args.amount, input_path=args.weights or args.input, output_path=args.output, num_classes=args.num_classes)
-    elif args.command == 'benchmark':
-        benchmark_onnx_model(args.model, N=args.N, batch_size=args.batch_size)
-    elif args.command == 'evaluate':
-        eval_onnx_classifier(args.model, batch_size=args.batch_size, max_batches=args.max_batches)
+    elif args.command == "prune":
+        from .prune import export_pruned_model_onnx
+
+        export_pruned_model_onnx(args.amount, args.weights, args.output, num_classes=args.num_classes, save_path=args.save)
+    elif args.command == "quantize":
+        from . import quantize as q
+
+        if args.mode == "static":
+            calib = (q.cifar10_calibration_batches(args.calib_size) if args.calib_data == "cifar10"
+                     else q.synthetic_calibration_batches(args.calib_size))
+            q.quantize_onnx_static(args.input, args.output, calib, per_channel=not args.no_per_channel)
+        else:
+            q.quantize_onnx_dynamic(args.input, args.output, quant_type="int8" if args.mode == "dynamic" else "fp16")
+    elif args.command == "benchmark":
+        from .benchmark import benchmark_onnx_model
+
+        benchmark_onnx_model(args.model, N=args.N, batch_size=args.batch_size, warmup=args.warmup, threads=args.threads)
+    elif args.command == "evaluate":
+        from .eval import eval_onnx_classifier
+
+        eval_onnx_classifier(args.model, batch_size=args.batch_size, subset=args.subset)
+    elif args.command == "report":
+        from .report import collect, parse_model_args, write_report
+
+        rows, meta = collect(parse_model_args(args.models), N=args.N, warmup=args.warmup, threads=args.threads,
+                             eval_subset=args.eval_subset, accuracy=not args.no_accuracy)
+        write_report(rows, meta, args.out_dir)
     else:
         parser.print_help()
+
 
 if __name__ == "__main__":
     main()

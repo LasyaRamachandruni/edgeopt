@@ -31,9 +31,12 @@ def make_session(model_path, threads=0):
     return onnxruntime.InferenceSession(model_path, opts, providers=["CPUExecutionProvider"])
 
 
-def benchmark_onnx_model(model_path, N=200, batch_size=1, input_shape=(3, 224, 224), warmup=20, threads=0, seed=0):
+def benchmark_onnx_model(model_path, N=200, batch_size=1, input_shape=None, warmup=20, threads=0, seed=0):
     sess = make_session(model_path, threads)
-    input_name = sess.get_inputs()[0].name
+    inp = sess.get_inputs()[0]
+    input_name = inp.name
+    if input_shape is None:  # take C, H, W from the model; the batch axis is dynamic
+        input_shape = tuple(d if isinstance(d, int) else 1 for d in inp.shape[1:])
     x = np.random.RandomState(seed).randn(batch_size, *input_shape).astype(np.float32)
 
     for _ in range(warmup):
@@ -48,6 +51,7 @@ def benchmark_onnx_model(model_path, N=200, batch_size=1, input_shape=(3, 224, 2
     metrics = summarize_timings(times, batch_size)
     metrics["warmup"] = warmup
     metrics["threads"] = threads
+    metrics["input_shape"] = [batch_size, *input_shape]
     metrics["model_size_mb"] = os.path.getsize(model_path) / 1e6
 
     print(f"Latency p50: {metrics['latency_p50_ms']:.2f} ms")
