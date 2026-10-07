@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 
-from edgeopt.benchmark import benchmark_onnx_model
+from edgeopt.benchmark import benchmark_onnx_model, summarize_timings
 from edgeopt.prune import export_pruned_model_onnx, prune_mobilenetv2_model
 from edgeopt.quantize import quantize_onnx_dynamic
 
@@ -94,7 +94,17 @@ def test_quantize_rejects_unknown_type(small_onnx, tmp_path):
 
 
 def test_benchmark_reports_metrics(small_onnx):
-    m = benchmark_onnx_model(str(small_onnx), N=20, batch_size=2, input_shape=(3, 16, 16))
-    assert m["latency_p95"] >= m["latency_p50"] > 0
-    assert m["throughput"] == pytest.approx(2 / m["latency_p50"])
-    assert m["model_size"] > 0
+    m = benchmark_onnx_model(str(small_onnx), N=20, batch_size=2, input_shape=(3, 16, 16), warmup=2)
+    assert m["latency_p95_ms"] >= m["latency_p50_ms"] > 0
+    assert m["runs"] == 20 and m["batch_size"] == 2
+    assert m["model_size_mb"] > 0
+
+
+def test_throughput_uses_total_wall_time():
+    # 3 runs of 10 ms and one 70 ms outlier: 4 runs x 4 images in 0.1 s = 160 images/s.
+    # batch / p50 would have reported 400 images/s.
+    m = summarize_timings([0.01, 0.01, 0.01, 0.07], batch_size=4)
+    assert m["throughput_ips"] == pytest.approx(160.0)
+    assert m["latency_p50_ms"] == pytest.approx(10.0)
+    assert m["latency_mean_ms"] == pytest.approx(25.0)
+    assert m["latency_p95_ms"] > m["latency_p50_ms"]
