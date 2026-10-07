@@ -48,6 +48,7 @@ def main(argv=None):
     p.add_argument("--N", type=int, default=200)
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--threads", type=int, default=1)
+    p.add_argument("--repeats", type=int, default=3, help="Benchmark each model this many times (interleaved), report the median")
     p.add_argument("--eval-subset", type=int, default=None, help="Evaluate on N test images instead of all 10k")
     p.add_argument("--no-accuracy", action="store_true")
 
@@ -84,7 +85,7 @@ def main(argv=None):
         from .report import collect, parse_model_args, write_report
 
         rows, meta = collect(parse_model_args(args.models), N=args.N, warmup=args.warmup, threads=args.threads,
-                             eval_subset=args.eval_subset, accuracy=not args.no_accuracy)
+                             repeats=args.repeats, eval_subset=args.eval_subset, accuracy=not args.no_accuracy)
         write_report(rows, meta, args.out_dir)
     else:
         parser.print_help()

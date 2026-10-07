@@ -39,7 +39,7 @@ def cpu_name():
     return platform.processor() or "unknown"
 
 
-def collect(models, N=200, warmup=20, threads=1, eval_subset=None, accuracy=True, data_root="./data"):
+def collect(models, N=200, warmup=20, threads=1, repeats=1, eval_subset=None, accuracy=True, data_root="./data"):
     testset, acc_note = None, None
     if accuracy:
         try:
@@ -52,20 +52,29 @@ def collect(models, N=200, warmup=20, threads=1, eval_subset=None, accuracy=True
     else:
         acc_note = "accuracy not requested"
 
+    # Benchmark models round-robin and take the median over repeats, so a burst of
+    # load from another process doesn't land on just one model.
+    runs = {name: [] for name, _ in models}
+    for rep in range(repeats):
+        for name, path in models:
+            print(f"== [{rep + 1}/{repeats}] {name}: {path}")
+            runs[name].append(benchmark_onnx_model(path, N=N, warmup=warmup, threads=threads))
+
     rows = []
     for name, path in models:
-        print(f"== {name}: {path}")
-        bench = benchmark_onnx_model(path, N=N, warmup=warmup, threads=threads)
+        reps = runs[name]
+        med = {k: float(np.median([r[k] for r in reps])) for k in ("latency_p50_ms", "latency_p95_ms", "throughput_ips")}
         row = {
             "model": name,
             "path": os.path.basename(path),
             "params": onnx_param_count(path),
             "size_mb": round(os.path.getsize(path) / 1e6, 2),
-            "latency_p50_ms": round(bench["latency_p50_ms"], 2),
-            "latency_p95_ms": round(bench["latency_p95_ms"], 2),
-            "throughput_ips": round(bench["throughput_ips"], 1),
+            "latency_p50_ms": round(med["latency_p50_ms"], 2),
+            "latency_p95_ms": round(med["latency_p95_ms"], 2),
+            "throughput_ips": round(med["throughput_ips"], 1),
             "accuracy": None,
-            "input_shape": bench["input_shape"],
+            "input_shape": reps[0]["input_shape"],
+            "repeats": [{k: round(r[k], 3) for k in ("latency_p50_ms", "latency_p95_ms", "throughput_ips")} for r in reps],
         }
         if testset is not None:
             from edgeopt.eval import accuracy_onnx
@@ -79,7 +88,7 @@ def collect(models, N=200, warmup=20, threads=1, eval_subset=None, accuracy=True
         "logical_cpus": os.cpu_count(),
         "ort_threads": threads,
         "onnxruntime": onnxruntime.__version__,
-        "benchmark": f"batch 1, random input of the model's input shape, {warmup} warmup + {N} timed runs",
+        "benchmark": f"batch 1, random input of the model's input shape, {warmup} warmup + {N} timed runs per repeat; median of {repeats} repeat(s), models interleaved",
         "accuracy_set": None if testset is None else f"CIFAR-10 test, {len(testset)} images",
         "accuracy_note": acc_note,
     }
