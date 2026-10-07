@@ -1,64 +1,81 @@
-import os
-import torch
-import torch.nn.utils.prune as prune
-import torchvision.models as models
-import torch.nn as nn
-from edgeopt.utils import onnx_export_kwargs
+"""Structured channel pruning that actually removes channels.
 
-def prune_mobilenetv2_model(model, amount=0.3, min_layer=5):
+The earlier version used torch.nn.utils.prune.ln_structured, which only zeroes
+filters: tensor shapes, parameter count, ONNX size and latency stayed the same.
+Here torch-pruning builds a dependency graph of the network (depthwise convs,
+BatchNorms and residual adds that must lose the same channels) and slices the
+weights, so the pruned model is genuinely smaller.
+"""
+
+import torch
+import torch.nn as nn
+import torch_pruning as tp
+
+from edgeopt.export import build_mobilenetv2, export_model_onnx
+
+
+def count_params(model):
+    return sum(p.numel() for p in model.parameters())
+
+
+def prune_mobilenetv2_model(model, amount=0.3, img_size=224, round_to=8):
+    """Remove `amount` of the channels in every prunable layer (L2-magnitude ranking).
+
+    The classifier output layer is left alone so the model still predicts the same
+    classes. Channel counts are rounded to multiples of `round_to`, which keeps
+    them friendly to SIMD kernels. Modifies `model` in place and returns it.
     """
-    Prunes only Conv2d layers in Bottleneck blocks at index >= min_layer in model.features.
-    By default, skips the first several blocks to avoid hurting initial feature extraction.
-    """
-    for idx, block in enumerate(model.features):
-        if idx >= min_layer:  # Only prune after min_layer (e.g., deeper feature extractors)
-            for name, module in block.named_modules():
-                if isinstance(module, nn.Conv2d):
-                    prune.ln_structured(module, name="weight", amount=amount, n=2, dim=0)
-                    prune.remove(module, 'weight')  # Finalize pruning
+    if not 0.0 <= amount < 1.0:
+        raise ValueError("amount must be in [0, 1)")
+    model.eval()
+    if amount == 0:
+        return model
+    example = torch.randn(1, 3, img_size, img_size)
+    head = [m for m in model.modules() if isinstance(m, nn.Linear)][-1]
+    pruner = tp.pruner.MagnitudePruner(
+        model,
+        example,
+        importance=tp.importance.MagnitudeImportance(p=2),
+        pruning_ratio=amount,
+        ignored_layers=[head],
+        round_to=round_to,
+    )
+    pruner.step()
     return model
 
-def export_pruned_model_onnx(amount=0.3, input_path=None, output_path="mobilenetv2_pruned.onnx", num_classes: int = 10, min_prune_layer=5):
-    """
-    Prune a MobileNetV2 model and export to ONNX after loading weights.
-    Optionally, only prunes Conv2d layers at features[min_prune_layer:] and beyond.
-    """
-    # Build and load model
-    model = models.mobilenet_v2(weights=None)
-    model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
-    if input_path and os.path.isfile(input_path):
-        model.load_state_dict(torch.load(input_path, map_location='cpu'))
-    
-    model.eval()
-    pruned_model = prune_mobilenetv2_model(model, amount=amount, min_layer=min_prune_layer)
-    
-    # OPTIONAL: Save pruned weights for retraining before export!
-    torch.save(pruned_model.state_dict(), "pruned_mobilenetv2_cifar10.pth")
 
-    # Export to ONNX
-    dummy_input = torch.randn(1, 3, 224, 224)
-    torch.onnx.export(
-        pruned_model,
-        dummy_input,
-        output_path,
-        export_params=True,
-        opset_version=13,
-        do_constant_folding=True,
-        input_names=['input'],
-        output_names=['output'],
-        dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}},
-        **onnx_export_kwargs(),
-    )
-    print(f"Pruned model (prune ratio={amount}, from layer={min_prune_layer}) exported to {output_path}")
+def save_pruned(model, path):
+    # The architecture changed, so a plain state_dict can't be loaded back into
+    # torchvision's mobilenet_v2. Save the whole module instead.
+    torch.save(model, path)
+
+
+def load_pruned(path):
+    return torch.load(path, map_location="cpu", weights_only=False).eval()
+
+
+def export_pruned_model_onnx(amount=0.3, input_path=None, output_path="mobilenetv2_pruned.onnx",
+                             num_classes=10, save_path=None, img_size=224):
+    model = build_mobilenetv2(num_classes, input_path)
+    before = count_params(model)
+    prune_mobilenetv2_model(model, amount=amount, img_size=img_size)
+    after = count_params(model)
+    if save_path:
+        save_pruned(model, save_path)
+    export_model_onnx(model, output_path, img_size=img_size)
+    print(f"Pruned {amount:.0%} of channels: {before:,} -> {after:,} params ({after / before:.1%}). "
+          f"Exported to {output_path}")
+    return model
+
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--amount', type=float, default=0.1, help="Fraction of channels to prune (e.g., 0.1 is safe)")
-    parser.add_argument('--weights', type=str, required=True, help="Fine-tuned weights path (.pth) to prune")
-    parser.add_argument('--output', default='mobilenetv2_pruned.onnx', help="Output ONNX path")
-    parser.add_argument('--num-classes', type=int, default=10, help="Number of classes (CIFAR-10 = 10)")
-    parser.add_argument('--min-prune-layer', type=int, default=5, help="Index of feature block to start pruning")
-    args = parser.parse_args()
 
-    export_pruned_model_onnx(args.amount, args.weights, args.output, num_classes=args.num_classes, min_prune_layer=args.min_prune_layer)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--amount", type=float, default=0.3, help="Fraction of channels to remove per layer")
+    parser.add_argument("--weights", default=None, help="Fine-tuned state_dict (.pth) to prune")
+    parser.add_argument("--output", default="mobilenetv2_pruned.onnx")
+    parser.add_argument("--save", default=None, help="Also save the pruned PyTorch module here")
+    parser.add_argument("--num-classes", type=int, default=10)
+    args = parser.parse_args()
+    export_pruned_model_onnx(args.amount, args.weights, args.output, args.num_classes, args.save)

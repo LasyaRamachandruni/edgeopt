@@ -9,13 +9,9 @@ import torch.nn as nn
 import torchvision.models as models
 
 from edgeopt.benchmark import benchmark_onnx_model, summarize_timings
-from edgeopt.prune import export_pruned_model_onnx, prune_mobilenetv2_model
+from edgeopt.export import export_model_onnx
+from edgeopt.prune import count_params, export_pruned_model_onnx, load_pruned, prune_mobilenetv2_model
 from edgeopt.quantize import quantize_onnx_dynamic
-
-
-def zero_channel_fraction(conv: nn.Conv2d) -> float:
-    w = conv.weight.detach().flatten(1)
-    return (w.abs().sum(dim=1) == 0).float().mean().item()
 
 
 def mobilenet(num_classes=10):
@@ -25,35 +21,48 @@ def mobilenet(num_classes=10):
     return m.eval()
 
 
-def test_prune_zeroes_channels_only_in_later_blocks():
-    model = prune_mobilenetv2_model(mobilenet(), amount=0.3, min_layer=5)
-    for idx, block in enumerate(model.features):
-        for conv in (m for m in block.modules() if isinstance(m, nn.Conv2d)):
-            frac = zero_channel_fraction(conv)
-            if idx < 5:
-                assert frac == 0.0, f"block {idx} should be untouched"
-            else:
-                expected = round(0.3 * conv.out_channels) / conv.out_channels
-                assert frac == pytest.approx(expected, abs=1e-6), f"block {idx}"
+@pytest.mark.parametrize("amount", [0.3, 0.5])
+def test_prune_removes_parameters_and_keeps_output_shape(amount):
+    model = mobilenet()
+    before = count_params(model)
+    prune_mobilenetv2_model(model, amount=amount, img_size=64)
+    after = count_params(model)
+    # Channels are removed on both sides of most convs, so params shrink by more than `amount`.
+    assert after < (1 - amount) * before
+    out = model(torch.randn(3, 3, 64, 64))
+    assert out.shape == (3, 10)
 
 
-def test_pruning_is_permanent():
-    # prune.remove() should leave plain weights, not a mask + original pair.
-    model = prune_mobilenetv2_model(mobilenet(), amount=0.2, min_layer=5)
-    names = {n for n, _ in model.named_parameters()}
-    assert not any(n.endswith("weight_orig") for n in names)
+def test_prune_shrinks_conv_tensors():
+    model = prune_mobilenetv2_model(mobilenet(), amount=0.5, img_size=64)
+    ref = mobilenet()
+    pruned_convs = [m for m in model.modules() if isinstance(m, nn.Conv2d)]
+    ref_convs = [m for m in ref.modules() if isinstance(m, nn.Conv2d)]
+    assert len(pruned_convs) == len(ref_convs)
+    assert sum(c.out_channels for c in pruned_convs) < 0.6 * sum(c.out_channels for c in ref_convs)
+    assert model.classifier[1].out_features == 10
 
 
-def test_export_pruned_model(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)  # export also writes a .pth checkpoint to the cwd
+def test_prune_rejects_bad_amount():
+    with pytest.raises(ValueError):
+        prune_mobilenetv2_model(mobilenet(), amount=1.0)
+
+
+def test_export_pruned_model(tmp_path):
+    full = tmp_path / "full.onnx"
     out = tmp_path / "pruned.onnx"
-    export_pruned_model_onnx(amount=0.1, output_path=str(out), num_classes=10)
+    export_model_onnx(mobilenet(), str(full))
+    export_pruned_model_onnx(amount=0.3, output_path=str(out), num_classes=10, save_path=str(tmp_path / "p.pt"))
     onnx.checker.check_model(onnx.load(str(out)))
+    assert out.stat().st_size < 0.6 * full.stat().st_size
 
     sess = ort.InferenceSession(str(out))
     batch = np.random.randn(2, 3, 224, 224).astype(np.float32)
     (logits,) = sess.run(None, {sess.get_inputs()[0].name: batch})
     assert logits.shape == (2, 10)  # dynamic batch axis works
+
+    reloaded = load_pruned(str(tmp_path / "p.pt"))
+    assert count_params(reloaded) < count_params(mobilenet())
 
 
 class SmallNet(nn.Module):
