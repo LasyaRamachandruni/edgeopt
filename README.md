@@ -1,228 +1,125 @@
-# 🌐 EdgeOpt: Edge-Optimized ONNX Model Converter & Benchmark
+# EdgeOpt
 
-**EdgeOpt** is a comprehensive Python toolkit for optimizing PyTorch models for **edge deployment**.  
-It streamlines model export, quantization, pruning, benchmarking, and accuracy evaluation — all through a single command-line interface.  
-Designed for researchers, engineers, and learners alike, EdgeOpt bridges the gap between model training and real-world deployment on resource-constrained devices.
+A small CLI for taking a MobileNetV2 fine-tuned on CIFAR-10 to ONNX and measuring what
+pruning and INT8 quantization actually buy you on a CPU with ONNX Runtime.
 
----
+- `export`: PyTorch state_dict to ONNX (dynamic batch axis, opset 13)
+- `prune`: structured channel pruning with [torch-pruning](https://github.com/VainF/Torch-Pruning).
+  Channels are physically removed (conv, BN, depthwise and residual-coupled layers are sliced
+  together), so parameters, file size and latency go down, not just the number of zeros
+- `quantize`: ONNX Runtime static INT8 (QDQ, per-channel weights, activations calibrated on
+  CIFAR-10 training images). Dynamic INT8 and FP16 are still available
+- `benchmark`: batch-1 latency p50/p95 and throughput (images / total timed wall time)
+- `evaluate`: top-1 accuracy on the CIFAR-10 test set or a fixed seeded subset
+- `report`: runs benchmark (+ evaluate when CIFAR-10 is available) for a list of models and
+  writes `results/results.json` and `results/results.md`
 
-## 🧭 Overview
-
-EdgeOpt was built to address a growing challenge in modern AI: **how to run deep learning models efficiently on edge hardware** such as mobile devices, IoT sensors, and embedded boards.  
-This toolkit transforms a typical PyTorch model into an optimized, deployable ONNX artifact, evaluated and benchmarked for real-world performance.
-
-It supports:
-- ✅ End-to-end model optimization (Export → Quantize → Prune → Benchmark → Evaluate)
-- ⚙️ Dynamic INT8/FP16 quantization
-- ✂️ Structured channel pruning
-- 📊 Comprehensive benchmarking (latency, throughput, memory)
-- 🎯 CIFAR-10 accuracy evaluation
-- 💻 CLI-based workflow for easy automation
-
----
-
-## 📘 Project Achievements and Workflow (2025)
-
-### 🎯 Introduction
-
-EdgeOpt was conceived as a comprehensive solution for **deploying and evaluating deep learning models on edge devices**.  
-Over the course of its development, multiple modules and workflows were created to optimize neural networks for speed, efficiency, and real-world usability — without sacrificing too much accuracy.
-
----
-
-### 🧩 Core Achievements
-
-#### 1. End-to-End Optimization Pipeline
-
-At the heart of EdgeOpt is a **unified CLI-driven pipeline** that takes a standard PyTorch model and converts it into a fully optimized ONNX model — ready for deployment.
-
-- **Model Export**: Converts common PyTorch architectures to ONNX, ensuring runtime compatibility.  
-- **Quantization**: Integrates dynamic INT8/FP16 quantization for low-memory, high-speed inference.  
-- **Pruning**: Applies structured channel pruning to shrink model size while retaining accuracy.  
-- **Benchmarking**: Measures latency (p50, p95), throughput (FPS), model size, and memory footprint.
-
-These modules together form a reproducible workflow for model optimization on edge platforms like Raspberry Pi, Jetson Nano, or mobile CPUs.
-
----
-
-#### 2. Automated Accuracy Evaluation
-
-Performance alone is not enough — **EdgeOpt quantifies accuracy trade-offs** after each optimization step.
-
-- Runs inference on CIFAR-10 to measure classification accuracy.  
-- Compares pre- and post-optimization performance to visualize trade-offs.  
-- Provides users with data-driven insight into optimization results.
-
----
-
-#### 3. Fine-Tuning for Realistic Deployment
-
-Recognizing that pretrained models require adaptation for specific datasets, EdgeOpt provides a **fine-tuning pipeline**:
-
-- Fine-tunes **MobileNetV2** on CIFAR-10 using `scripts/finetune_mobilenet_cifar.py`.  
-- Automatically exports, evaluates, and optimizes the trained model.  
-- Supports reproducible training and hyperparameter tuning for robust experiments.
-
----
-
-#### 4. Robust Project Structure & Best Practices
-
-EdgeOpt follows **software engineering best practices** for research and development:
-
-- Clean repository organization and version control.  
-- Automated environment setup via `requirements.txt`.  
-- Modular, extensible Python codebase for easy customization.  
-- Clear documentation and CLI tools for all modules.
-
----
-
-#### 5. Experimentation & Evaluation
-
-Comprehensive experiments validated every stage of the pipeline:
-
-- Latency and throughput comparison for vanilla, quantized, and pruned models.  
-- Accuracy evaluation before and after optimization.  
-- Model size reduction analysis for deployment feasibility.  
-- Scripts and notebooks for reproducible benchmarking.
-
----
-
-### 🌍 Impact and Future Directions
-
-EdgeOpt represents a **holistic approach to edge AI** — merging research rigor with engineering practicality.
-
-Future improvements include:
-- Support for more architectures (e.g., ResNet, EfficientNet).  
-- Hardware-aware profiling on multiple edge platforms.  
-- Automated report generation in HTML/Markdown.  
-- Collaborative features for open-source contributions.
-
-### 🧠 Conclusion
-
-EdgeOpt goes beyond model conversion — it’s a **complete edge AI deployment toolkit**.  
-It empowers developers to **quantify**, **compare**, and **understand** how optimization affects model performance and accuracy.
-
-> “Optimized models, simplified deployment — EdgeOpt brings AI to the edge.”
-
----
-
-## ⚙️ Quick Start
-
-### Installation
+## Install
 
 ```bash
 git clone https://github.com/LasyaRamachandruni/edgeopt.git
 cd edgeopt
-python -m venv venv
-source venv/bin/activate    # On Windows: .\venv\Scripts\activate
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
+pytest -q
 ```
-🧩 Fine-Tuning & Optimization Workflow
-1. Fine-tune MobileNetV2 for CIFAR-10
+
+## Workflow
+
 ```bash
-python scripts/finetune_mobilenet_cifar.py
+# 1. Fine-tune ImageNet-pretrained MobileNetV2 on CIFAR-10 (224x224 inputs)
+python scripts/finetune_mobilenet_cifar.py            # -> mobilenetv2_cifar10.pth
+
+# 2. Export the FP32 baseline
+edgeopt export -w mobilenetv2_cifar10.pth -o models/mobilenetv2_fp32.onnx --verify
+
+# 3. Prune 30% of channels per layer, fine-tune briefly, export
+python scripts/prune_finetune_export.py --weights mobilenetv2_cifar10.pth --amount 0.3 \
+    --train-subset 5000 --epochs 1 --output models/mobilenetv2_pruned30_ft.onnx
+
+# 4. Static INT8, calibrated on 300 CIFAR-10 training images
+edgeopt quantize -i models/mobilenetv2_fp32.onnx -o models/mobilenetv2_int8.onnx --calib-size 300
+
+# 5. Compare
+edgeopt report --threads 1 --eval-subset 2000 --models \
+    "FP32=models/mobilenetv2_fp32.onnx" "Pruned 30%=models/mobilenetv2_pruned30_ft.onnx" \
+    "INT8=models/mobilenetv2_int8.onnx"
 ```
 
-Downloads and prepares CIFAR-10
+`edgeopt prune` alone (no fine-tuning) is also available. The pruned module is saved whole
+(`--save pruned.pt`) because its layer shapes no longer match torchvision's `mobilenet_v2`.
 
-Adjusts MobileNetV2 classifier for 10 classes
+## Results
 
-Trains for 5 epochs (adjustable)
+Measured 2026-10-07 on a 2-vCPU Intel Xeon @ 2.10GHz (AVX-512 VNNI), no GPU, shared with
+another job. ONNX Runtime 1.29.0 with 1 intra-op thread. Batch 1, 3x224x224 input,
+30 warmup + 300 timed runs, repeated 5 times with the models interleaved; the table shows
+the median of the 5 repeats (every repeat is in `results/results.json`). Exact commands:
+[`results/commands.sh`](results/commands.sh).
 
-Saves model as mobilenetv2_cifar10.pth
+| Model | Top-1 acc (%) | Params | ONNX size (MB) | p50 (ms) | p95 (ms) | Throughput (img/s) |
+|---|---|---|---|---|---|---|
+| FP32 baseline | pending | 2,219,626 | 8.92 | 6.33 | 9.43 | 148.7 |
+| Pruned 30% (not fine-tuned) | pending | 1,079,842 | 4.36 | 3.61 | 5.45 | 255.8 |
+| Pruned 50% (not fine-tuned) | pending | 577,586 | 2.35 | 2.68 | 4.21 | 319.4 |
+| INT8 static QDQ (synthetic calib) | pending | 2,219,626 | 2.61 | 3.51 | 5.15 | 263.5 |
+| Pruned 30% + INT8 static (synthetic calib) | pending | 1,079,842 | 1.39 | 2.56 | 6.44 | 331.9 |
+| Pruned 50% + INT8 static (synthetic calib) | pending | 577,586 | 0.83 | 2.23 | 5.78 | 370.4 |
+| INT8 dynamic (previous method) | pending | 2,219,834 | 2.42 | 23.06 | 32.95 | 40.7 |
 
-2. Export the Trained Model to ONNX
-3. Optimize & Evaluate the Model
-    ```bash
-    edgeopt quantize --input mobilenetv2_cifar10.onnx --output model_int8.onnx --quant-type int8
-    edgeopt prune --amount 0.3 --output mobilenetv2_pruned.onnx
-    edgeopt benchmark --model model_int8.onnx --N 200 --batch-size 1
-    edgeopt evaluate --model model_int8.onnx --batch-size 64
-   ```
+Params are the weight elements stored in the ONNX graph (BatchNorm is folded into the convs on
+export, so the FP32 count is slightly below the 2,236,682 PyTorch parameters). "Pruned 30%"
+removes 30% of the channels in every layer except the classifier output, rounded to multiples
+of 8; since most convs lose channels on both their input and output side, parameters drop by
+about half.
 
+**Accuracy is pending.** CIFAR-10 could not be downloaded on the benchmark machine: both
+torchvision (cs.toronto.edu) and the Hugging Face `uoft-cs/cifar10` dataset were blocked by
+the network proxy (HTTP 403). That also means:
 
+- the pruned models in the table have not been fine-tuned after pruning, and
+- the INT8 models were calibrated on random noise instead of training images.
 
-## 🏁 Experimental Results and Analysis
+Neither affects the size, parameter or latency columns (fine-tuning and calibration change
+weight and scale values, not the graph), but the accuracy of these exact files would be poor
+and is deliberately not reported. Everything that needs data is in
+[`results/pending.sh`](results/pending.sh): fine-tune each pruned model for 1 epoch on a fixed
+5,000-image training subset, calibrate INT8 on 300 real training images, then run
+`edgeopt report ... --eval-subset 2000` (fixed seeded 2,000-image test subset). A smoke test of
+the fine-tune loop on this machine took about 0.13 s/image for the 50% model at 224x224 with one
+thread, so roughly 10-15 minutes per pruned model.
 
-### 🚀 Workflow Steps
+### What the numbers say
 
-1. **Fine-tune MobileNetV2 on CIFAR-10**
-   - Train for several epochs, save as `mobilenetv2_cifar10.pth`
-   - Achieved high test accuracy after training
+- Structural pruning works as advertised now: 30% of channels gives 2.0x fewer parameters, a
+  2.0x smaller file and 1.75x lower p50 latency. The previous `ln_structured` version only
+  zeroed weights and the ONNX file stayed at 8.9 MB.
+- Static INT8 is 3.4x smaller and 1.8x faster than FP32 on this CPU. Dynamic INT8, which the
+  project used before, is 3.6x *slower* than FP32 (23 ms vs 6.3 ms): ORT has no fused integer
+  path for dynamically quantized Conv, so it runs ConvInteger and re-quantizes activations on
+  every call. This CPU has VNNI int8 dot-product instructions; on CPUs without them, static INT8
+  gains will be smaller.
+- Pruning and INT8 stack, but with diminishing returns on latency: at batch 1 the 50% pruned
+  model is already small enough that quantize/dequantize overhead and per-op dispatch are a
+  large share of the 2-3 ms. p95 is noisier for the INT8 models because the machine was shared.
 
-2. **Prune deeper layers and fine-tune for 3 epochs**
-   - Loss per epoch:  
-     `Epoch 1, Loss: 0.1779`  
-     `Epoch 2, Loss: 0.1323`  
-     `Epoch 3, Loss: 0.1211`
-   - Test accuracy after prune + retrain: **90.35%**
-   - Exported to ONNX: `mobilenetv2_pruned_finetuned.onnx`
+## Layout
 
-3. **Dynamic INT8 Quantization of pruned+finetuned ONNX**
-   - Output: `mobilenetv2_pruned_finetuned_int8.onnx`
+| File | |
+|---|---|
+| `edgeopt/export.py` | build MobileNetV2 with a 10-class head, export to ONNX |
+| `edgeopt/prune.py` | structured pruning (torch-pruning dependency graph) |
+| `edgeopt/train.py` | short recovery fine-tune and PyTorch accuracy |
+| `edgeopt/quantize.py` | static QDQ INT8, dynamic INT8, FP16 |
+| `edgeopt/benchmark.py` | latency/throughput |
+| `edgeopt/eval.py` | ONNX accuracy on CIFAR-10 |
+| `edgeopt/data.py` | CIFAR-10 loading (torchvision, then Hugging Face) |
+| `edgeopt/report.py` | results.json / results.md |
+| `scripts/finetune_mobilenet_cifar.py` | initial CIFAR-10 fine-tune |
+| `scripts/prune_finetune_export.py` | prune, fine-tune, export |
 
-4. **Benchmark and Evaluate All Models**
-   - Used CLI to measure latency, throughput, and size
+## Contact
 
-### 📊 Results Table
-
-| Model                       | Size (MB) | Latency p50 (ms) | Latency p95 (ms) | Throughput (FPS) | Accuracy (%) |
-|-----------------------------|-----------|------------------|------------------|------------------|-------------|
-| Pruned + Fine-Tuned ONNX    |   8.51    |      3.75        |     15.95        |     266.47       |   90.35     |
-| Pruned + FT + Quantized     |   2.31    |     31.78        |     47.33        |     31.47        |   87.74     |
-
-> *Baseline ONNX results omitted due to lack of reproducible accuracy; focus placed on successful pruning + fine-tuning and quantization pipeline.*
-
-### 💡 Discussion
-
-- Pruning with retraining preserved almost all accuracy and provided significant model compression.
-- Quantization further reduced model size and memory footprint, enabling real edge deployment.
-- The CLI workflow is fully reproducible; results can be replicated and extended for additional architectures.
-
-
-
-🧱 Module Summary
-File	Description
-export.py	Converts PyTorch models to ONNX format with verification
-quantize.py	Performs dynamic quantization (INT8/FP16)
-prune.py	Structured channel pruning for model compression
-benchmark.py	Reports latency, throughput, memory, and size metrics
-eval.py	Evaluates ONNX models on CIFAR-10 for accuracy
-cli.py	Provides a unified command-line interface for all modules
-
-🧾 Requirements
-Python 3.8+
-PyTorch 2.0+
-ONNX Runtime
-NumPy
-torchvision
-tqdm
-psutil
-Full list available in requirements.txt.
-
-🙏 Acknowledgments
-Built using:
-PyTorch
-ONNX Runtime
-
-Developed as part of AI/ML research at San Jose State University, with inspiration from real-world edge AI optimization challenges.
-
-📚 Citation
-
-If you use EdgeOpt in your research or project, please cite:
-
-@software{edgeopt2025,
-  title = {EdgeOpt: Edge-Optimized ONNX Model Converter & Benchmark},
-  author = {Ramachandruni, Swathi Sri Lasya Mayukha},
-  year = {2025},
-  url = {https://github.com/LasyaRamachandruni/edgeopt}
-}
-
-📫 Contact
-
-Author: Swathi Sri Lasya Mayukha Ramachandruni
-Email: swathisrilasyamayukha.ramachandruni@sjsu.edu
-GitHub: @LasyaRamachandruni
-
-✨ EdgeOpt is where deep learning meets deployment — optimized, efficient, and ready for the edge.
+Swathi Sri Lasya Mayukha Ramachandruni - swathisrilasyamayukha.ramachandruni@sjsu.edu -
+[@LasyaRamachandruni](https://github.com/LasyaRamachandruni)
