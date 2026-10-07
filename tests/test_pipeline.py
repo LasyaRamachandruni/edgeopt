@@ -11,7 +11,7 @@ import torchvision.models as models
 from edgeopt.benchmark import benchmark_onnx_model, summarize_timings
 from edgeopt.export import export_model_onnx
 from edgeopt.prune import count_params, export_pruned_model_onnx, load_pruned, prune_mobilenetv2_model
-from edgeopt.quantize import quantize_onnx_dynamic
+from edgeopt.quantize import quantize_onnx_dynamic, quantize_onnx_static, synthetic_calibration_batches
 
 
 def mobilenet(num_classes=10):
@@ -95,6 +95,42 @@ def test_quantize_keeps_outputs_close(small_onnx, tmp_path, quant_type):
     assert np.abs(ref - got).max() < 0.05 * np.abs(ref).max() + 1e-3
     ratio = out.stat().st_size / small_onnx.stat().st_size
     assert ratio < (0.4 if quant_type == "int8" else 0.6)  # ~4x smaller for int8, ~2x for fp16
+
+
+class SmallConvNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(),
+            nn.Conv2d(32, 64, 3, padding=1, stride=2), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1), nn.Flatten(),
+        )
+        self.fc = nn.Linear(64, 10)
+
+    def forward(self, x):
+        return self.fc(self.features(x))
+
+
+def test_static_quantized_model_loads_and_runs(tmp_path):
+    torch.manual_seed(0)
+    src = tmp_path / "conv.onnx"
+    torch.onnx.export(SmallConvNet().eval(), torch.randn(1, 3, 32, 32), str(src),
+                      input_names=["input"], output_names=["output"], opset_version=13,
+                      dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}}, dynamo=False)
+    out = tmp_path / "conv_int8.onnx"
+    calib = synthetic_calibration_batches(n=32, input_shape=(3, 32, 32))
+    quantize_onnx_static(str(src), str(out), calib)
+
+    model = onnx.load(str(out))
+    onnx.checker.check_model(model)
+    ops = {n.op_type for n in model.graph.node}
+    assert "QuantizeLinear" in ops and "DequantizeLinear" in ops
+
+    x = calib[0]
+    ref = ort.InferenceSession(str(src)).run(None, {"input": x})[0]
+    got = ort.InferenceSession(str(out)).run(None, {"input": x})[0]
+    assert got.shape == (len(x), 10)
+    assert np.abs(ref - got).max() < 0.1 * np.abs(ref).max() + 1e-3
 
 
 def test_quantize_rejects_unknown_type(small_onnx, tmp_path):
